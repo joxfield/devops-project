@@ -1,0 +1,142 @@
+name: CI/CD
+
+# Push do dowolnej gałęzi: testy -> build -> publikacja obrazu na Docker Hub.
+# Push do main: dodatkowo automatyczny deploy na serwer AWS.
+# Zawsze: powiadomienie o wyniku na Discordzie.
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ${{ vars.DOCKERHUB_IMAGE }}   # zmienna repozytorium, np. kamil/devops-projekt
+
+jobs:
+  test:
+    name: Testy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: go vet + testy jednostkowe
+        working-directory: app
+        run: |
+          go vet ./...
+          go test -v ./...
+
+  build:
+    name: Build i publikacja obrazu
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag obrazu
+        id: vars
+        run: echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Metadane obrazu (tagi)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=sha,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Logowanie do Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build i push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: APP_VERSION=${{ steps.vars.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy na AWS
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: http://${{ secrets.SERVER_IP }}
+    steps:
+      - name: Klucz SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.SERVER_IP }}" >> ~/.ssh/known_hosts
+
+      - name: Aktualizacja aplikacji na serwerze
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          ssh -i ~/.ssh/id_deploy ubuntu@${{ secrets.SERVER_IP }} "
+            set -e
+            cd /opt/devops-projekt
+            sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=${TAG}/' .env
+            docker compose pull app
+            docker compose up -d app
+            docker image prune -f
+          "
+
+      - name: Smoke test
+        env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS "http://${{ secrets.SERVER_IP }}/" | grep -q "$TAG"; then
+              echo "Wdrożona wersja $TAG odpowiada"; exit 0
+            fi
+            sleep 3
+          done
+          echo "Aplikacja nie odpowiada w wersji $TAG"; exit 1
+
+  notify:
+    name: Powiadomienie Discord
+    needs: [test, build, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wyślij wynik
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TEST: ${{ needs.test.result }}
+          BUILD: ${{ needs.build.result }}
+          DEPLOY: ${{ needs.deploy.result }}
+          BRANCH: ${{ github.ref_name }}
+          MSG: ${{ github.event.head_commit.message }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [[ "$TEST" == "success" && "$BUILD" == "success" && ( "$DEPLOY" == "success" || "$DEPLOY" == "skipped" ) ]]; then
+            COLOR=3066993; TITLE="✅ Pipeline OK"
+          else
+            COLOR=15158332; TITLE="❌ Pipeline FAILED"
+          fi
+          icon() { case "$1" in success) echo "✅";; skipped) echo "⏭️";; *) echo "❌";; esac; }
+          DESC=$(printf '**Gałąź:** `%s`\n**Commit:** %s\n\n%s Testy: %s\n%s Build + push: %s\n%s Deploy: %s' \
+            "$BRANCH" "${MSG%%$'\n'*}" "$(icon $TEST)" "$TEST" "$(icon $BUILD)" "$BUILD" "$(icon $DEPLOY)" "$DEPLOY")
+          jq -n --arg t "$TITLE" --arg d "$DESC" --arg u "$RUN_URL" --argjson c "$COLOR" \
+            '{embeds:[{title:$t, description:$d, url:$u, color:$c}]}' \
+            | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"

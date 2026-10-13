@@ -1,0 +1,7 @@
+# Skopiuj do terraform.tfvars i uzupełnij.
+# Swój IP sprawdzisz komendą: curl -s ifconfig.me
+admin_cidr = "1.2.3.4/32"
+
+# region            = "eu-central-1"
+# instance_type     = "t3.small"
+# ssh_public_key_path = "~/.ssh/devops-projekt.pub"

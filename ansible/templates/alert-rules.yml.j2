@@ -1,0 +1,29 @@
+groups:
+  - name: devops-projekt
+    rules:
+      - alert: AplikacjaNiedostepna
+        expr: up{job="app"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aplikacja nie odpowiada"
+          description: "Prometheus nie może pobrać metryk z aplikacji od ponad minuty."
+
+      - alert: WysokieUzycieCPU
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU serwera > 85%"
+          description: "Użycie CPU wynosi {{ '{{' }} $value | printf \"%.0f\" {{ '}}' }}%."
+
+      - alert: MaloMiejscaNaDysku
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mniej niż 15% wolnego miejsca na dysku"
+          description: "Zostało {{ '{{' }} $value | printf \"%.0f\" {{ '}}' }}% wolnego miejsca."

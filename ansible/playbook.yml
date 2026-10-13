@@ -1,0 +1,130 @@
+---
+# Konfiguracja serwera: Docker + aplikacja + stos monitoringu.
+# Playbook jest idempotentny – można go uruchamiać wielokrotnie.
+- name: Konfiguracja serwera aplikacji
+  hosts: app
+  become: true
+
+  vars:
+    app_dir: /opt/devops-projekt
+    dockerhub_image: "{{ lookup('env', 'DOCKERHUB_IMAGE') }}"            # np. kamil/devops-projekt
+    discord_webhook_url: "{{ lookup('env', 'DISCORD_WEBHOOK_URL') }}"
+    grafana_admin_password: "{{ lookup('env', 'GRAFANA_ADMIN_PASSWORD') | default('admin', true) }}"
+
+  pre_tasks:
+    - name: Sprawdź wymagane zmienne
+      ansible.builtin.assert:
+        that:
+          - dockerhub_image | length > 0
+          - discord_webhook_url | length > 0
+        fail_msg: "Ustaw zmienne środowiskowe DOCKERHUB_IMAGE i DISCORD_WEBHOOK_URL (patrz README)."
+
+  tasks:
+    # ---------- Docker ----------
+    - name: Pakiety wymagane do repozytorium Dockera
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Katalog na klucze apt
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Klucz GPG Dockera
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Repozytorium Dockera
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Instalacja Dockera i pluginu compose
+      ansible.builtin.apt:
+        name: [docker-ce, docker-ce-cli, containerd.io, docker-compose-plugin]
+        state: present
+        update_cache: true
+
+    - name: Docker uruchomiony i włączony przy starcie
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Użytkownik ubuntu w grupie docker (deploy z CI bez sudo)
+      ansible.builtin.user:
+        name: ubuntu
+        groups: docker
+        append: true
+
+    # ---------- Pliki aplikacji i monitoringu ----------
+    - name: Katalogi projektu
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/prometheus"
+        - "{{ app_dir }}/alertmanager"
+        - "{{ app_dir }}/grafana/provisioning/datasources"
+        - "{{ app_dir }}/grafana/provisioning/dashboards"
+        - "{{ app_dir }}/grafana/dashboards"
+
+    - name: Plik .env z tagiem obrazu (tworzony tylko raz – później aktualizuje go CI/CD)
+      ansible.builtin.copy:
+        dest: "{{ app_dir }}/.env"
+        content: |
+          IMAGE={{ dockerhub_image }}
+          IMAGE_TAG=latest
+        force: false
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+
+    - name: Szablony konfiguracji
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ app_dir }}/{{ item.dest }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+      loop:
+        - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+        - { src: prometheus.yml.j2, dest: prometheus/prometheus.yml }
+        - { src: alert-rules.yml.j2, dest: prometheus/alert-rules.yml }
+        - { src: alertmanager.yml.j2, dest: alertmanager/alertmanager.yml }
+        - { src: grafana-datasource.yml.j2, dest: grafana/provisioning/datasources/datasource.yml }
+        - { src: grafana-dashboards.yml.j2, dest: grafana/provisioning/dashboards/dashboards.yml }
+      notify: Restart stosu
+
+    - name: Dashboard Grafany
+      ansible.builtin.copy:
+        src: grafana/dashboards/
+        dest: "{{ app_dir }}/grafana/dashboards/"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+
+    - name: Uruchom aplikację i monitoring
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        state: present
+        pull: missing
+
+  handlers:
+    - name: Restart stosu
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        state: restarted
