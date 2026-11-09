@@ -75,24 +75,25 @@ jobs:
   deploy:
     name: Deploy na AWS
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # Deploy tylko z main i tylko gdy serwer już istnieje (zmienna SERVER_IP ustawiona)
+    if: github.ref == 'refs/heads/main' && vars.SERVER_IP != ''
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: http://${{ secrets.SERVER_IP }}
+      url: http://${{ vars.SERVER_IP }}
     steps:
       - name: Klucz SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
-          ssh-keyscan -H "${{ secrets.SERVER_IP }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ vars.SERVER_IP }}" >> ~/.ssh/known_hosts
 
       - name: Aktualizacja aplikacji na serwerze
         env:
           TAG: ${{ needs.build.outputs.tag }}
         run: |
-          ssh -i ~/.ssh/id_deploy ubuntu@${{ secrets.SERVER_IP }} "
+          ssh -i ~/.ssh/id_deploy ubuntu@${{ vars.SERVER_IP }} "
             set -e
             cd /opt/devops-projekt
             sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=${TAG}/' .env
@@ -106,7 +107,7 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
         run: |
           for i in $(seq 1 20); do
-            if curl -fsS "http://${{ secrets.SERVER_IP }}/" | grep -q "$TAG"; then
+            if curl -fsS "http://${{ vars.SERVER_IP }}/" | grep -q "$TAG"; then
               echo "Wdrożona wersja $TAG odpowiada"; exit 0
             fi
             sleep 3

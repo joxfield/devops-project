@@ -114,7 +114,6 @@ Secrets:
 | `DOCKERHUB_USERNAME` | login Docker Hub |
 | `DOCKERHUB_TOKEN` | token Docker Hub |
 | `SSH_PRIVATE_KEY` | zawartość `~/.ssh/devops-projekt` (klucz prywatny) |
-| `SERVER_IP` | wynik `terraform output server_ip` |
 | `DISCORD_WEBHOOK_URL` | URL webhooka |
 
 Variables:
@@ -122,6 +121,7 @@ Variables:
 | Nazwa | Wartość |
 |---|---|
 | `DOCKERHUB_IMAGE` | `LOGIN/devops-projekt` |
+| `SERVER_IP` | wynik `terraform output server_ip` (dopóki pusta, pipeline pomija deploy) |
 
 ## Monitoring
 
