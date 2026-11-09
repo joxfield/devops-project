@@ -35,7 +35,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html><html><head><title>DevOps Projekt</title></head>
 <body style="font-family:sans-serif;text-align:center;margin-top:15vh">
-<h1>Hello from DevOps Projekt!</h1>
+<h1>Hello from DevOps Projekt v2!</h1>
 <p>Wersja: <b>%s</b></p>
 <p>Host: %s</p>
 </body></html>`, version, hostname())

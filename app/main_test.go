@@ -13,7 +13,7 @@ func TestIndex(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("oczekiwano 200, jest %d", rr.Code)
 	}
-	if !strings.Contains(rr.Body.String(), "Hello from DevOps Projekt") {
+	if !strings.Contains(rr.Body.String(), "Hello from DevOps Projekt v2") {
 		t.Fatal("brak powitania w odpowiedzi")
 	}
 }
