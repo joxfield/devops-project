@@ -1,160 +1,114 @@
-# DevOps Projekt – CI/CD, IaC i monitoring
+# devops-project
 
-Projekt dyplomowy: prosta aplikacja webowa w Go, automatycznie budowana, publikowana jako obraz Dockera
-i wdrażana na serwer w AWS. Infrastruktura powstaje z kodu (Terraform + Ansible), a aplikację i serwer
-monitoruje Prometheus z Grafaną. Wyniki pipeline'u i alerty trafiają na Discorda.
+Projekt dyplomowy z kursu DevOps. Mała aplikacja w Go, którą GitHub Actions testuje, pakuje w obraz
+Dockera i wrzuca na Docker Hub, a z gałęzi `main` dodatkowo wdraża na serwer w AWS. Serwer stawia
+Terraform, konfiguruje Ansible. Na serwerze chodzi też Prometheus z Grafaną, a alerty i wyniki
+pipeline'u lecą na Discorda.
 
-## Architektura
+Sama aplikacja jest celowo prosta (strona z wersją, `/health` i `/metrics`), bo w projekcie chodziło
+o proces wokół niej, a nie o kod.
 
 ```mermaid
 graph LR
-    Dev[Developer] -- git push --> GH[GitHub]
-    GH -- trigger --> GA[GitHub Actions]
-    GA -- test + build --> GA
-    GA -- push obrazu --> DH[(Docker Hub)]
-    GA -- "deploy (tylko main), SSH" --> EC2
-    GA -- status --> DC[Discord]
-
-    TF[Terraform] -- VPC, SG, EC2, EIP --> EC2
-    AN[Ansible] -- Docker + compose --> EC2
-
-    subgraph EC2 [AWS EC2 – Ubuntu 24.04]
-        APP[app :80]
-        PR[Prometheus]
-        AM[Alertmanager]
-        NE[node-exporter]
-        CA[cAdvisor]
-        GR[Grafana :3000]
-        PR --> APP & NE & CA
-        GR --> PR
-        PR --> AM
-    end
-    DH -- docker pull --> APP
-    AM -- alerty --> DC
+    push[git push] --> GA[GitHub Actions]
+    GA -->|obraz| DH[(Docker Hub)]
+    GA -->|ssh, tylko main| EC2
+    GA -->|status| Discord
+    DH -->|docker pull| EC2
+    TF[Terraform + Ansible] --> EC2
+    EC2 -->|alerty| Discord
 ```
 
-## Stos technologiczny
+## Co jest w repo
 
-| Obszar | Narzędzie |
-|---|---|
-| Aplikacja | Go 1.22 (bez zewnętrznych zależności), testy jednostkowe `go test` |
-| Konteneryzacja | Docker (multi-stage build, obraz distroless, użytkownik nonroot) |
-| Rejestr artefaktów | Docker Hub |
-| CI/CD | GitHub Actions |
-| Infrastruktura | Terraform (AWS: VPC, podsieć, IGW, Security Group, EC2, Elastic IP) |
-| Konfiguracja | Ansible (Docker, docker compose, monitoring) |
-| Monitoring | Prometheus, node-exporter, cAdvisor, Grafana, Alertmanager |
-| Powiadomienia | Discord (webhook) – pipeline i alerty |
+- `app/` – aplikacja i testy (`go test`)
+- `Dockerfile` – build dwuetapowy, w wyniku obraz distroless ma kilka MB
+- `terraform/` – VPC, podsieć, security group, EC2 (Ubuntu 24.04, t3.small), Elastic IP
+- `ansible/` – instalacja Dockera i uruchomienie wszystkiego przez docker compose; w `templates/`
+  konfiguracja Prometheusa, Alertmanagera i Grafany, w `files/` dashboard
+- `.github/workflows/ci-cd.yml` – pipeline
+- `Makefile` – skróty do komend poniżej
 
-## Struktura repozytorium
+## Pipeline
 
-```
-app/                     kod aplikacji + testy
-Dockerfile               budowanie obrazu
-terraform/               infrastruktura AWS
-ansible/                 konfiguracja serwera, docker-compose, Prometheus, Grafana
-  templates/             szablony konfiguracji (compose, prometheus, alerty, alertmanager)
-  files/grafana/         gotowy dashboard
-.github/workflows/       pipeline CI/CD
-Makefile                 skróty: make all / make destroy
-```
+Każdy push, na dowolną gałąź:
 
-## Pipeline CI/CD
+1. `go vet` i testy
+2. build obrazu i push na Docker Hub z tagiem `sha-<commit>` i nazwą gałęzi (na `main` dodatkowo `latest`)
+3. powiadomienie na Discordzie ze statusem każdego kroku
 
-| Zdarzenie | Testy | Build + push na Docker Hub | Deploy na AWS | Powiadomienie |
-|---|---|---|---|---|
-| push do dowolnej gałęzi | ✅ | ✅ (tagi `sha-xxxxxxx`, `nazwa-gałęzi`) | – | ✅ |
-| push do `main` | ✅ | ✅ (dodatkowo tag `latest`) | ✅ | ✅ |
+Na `main` między 2 a 3 dochodzi deploy: Actions łączy się po SSH z serwerem, wpisuje nowy tag do
+`/opt/devops-projekt/.env` i robi `docker compose up -d app`. Na koniec smoke test sprawdza, czy
+strona zwraca już nową wersję. Jeśli nie, job jest czerwony.
 
-Deploy łączy się z serwerem po SSH, ustawia nowy tag obrazu w `/opt/devops-projekt/.env`,
-robi `docker compose pull && up -d app`, a potem smoke testem sprawdza, czy strona pokazuje nową wersję.
-Job `notify` uruchamia się zawsze i wysyła na Discorda status każdego etapu.
+Deploy jest pomijany, dopóki w repo nie ma zmiennej `SERVER_IP`, żeby dało się zbudować pierwszy obraz,
+zanim powstanie serwer.
 
-## Wymagania wstępne
+## Uruchomienie od zera
 
-Lokalnie: `terraform` ≥ 1.6, `ansible` ≥ 9 (pakiet pip `ansible`), `make`, AWS CLI ze skonfigurowanymi
-poświadczeniami (`aws configure`).
-
-Konta:
-1. **AWS** – użytkownik IAM z kluczem dostępowym (na potrzeby projektu wystarczą uprawnienia do EC2/VPC).
-2. **Docker Hub** – utwórz repozytorium `devops-projekt` i token (Account Settings → Personal access tokens, uprawnienia Read & Write).
-3. **Discord** – na swoim serwerze: Ustawienia kanału → Integracje → Webhooki → Nowy webhook → skopiuj URL.
-4. **GitHub** – nowe repozytorium, do którego wypchniesz ten kod.
-
-## Wdrożenie od zera
+Potrzebne: konto AWS z użytkownikiem IAM (`AmazonEC2FullAccess`), skonfigurowane `aws configure`,
+lokalnie `terraform`, `ansible` i `make`.
 
 ```bash
-# 1. Klucz SSH dla serwera
 ssh-keygen -t ed25519 -f ~/.ssh/devops-projekt -N ""
 
-# 2. Zmienne
-cp .env.example .env                                     # uzupełnij
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars   # wpisz swój IP
+cp .env.example .env                                  # obraz z Docker Huba, webhook, hasło do Grafany
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars   # admin_cidr = swoje IP/32
 
-# 3. Infrastruktura + konfiguracja serwera (dwie komendy w jednej)
-make all
-
-# 4. Adresy
-make output
+make all       # terraform apply + ansible-playbook
+make output    # adresy
 ```
 
-Uwaga: przed pierwszym `make all` obraz musi już istnieć na Docker Hubie – zrób najpierw jeden push
-do GitHuba (krok niżej) albo wypchnij obraz ręcznie: `docker build -t LOGIN/devops-projekt:latest . && docker push LOGIN/devops-projekt:latest`.
+Obraz `latest` musi już być na Docker Hubie, więc najpierw trzeba raz wypchnąć kod na `main`.
 
-Oba narzędzia są idempotentne: ponowne `make all` niczego nie zmienia, jeśli stan jest zgodny z kodem.
+`make all` można puszczać wielokrotnie – Terraform i Ansible nic nie zmieniają, jeśli stan się zgadza.
+Terraform sam generuje `ansible/inventory.ini` z adresem nowej maszyny.
 
-## Konfiguracja GitHub Actions
+`make destroy` usuwa wszystko z AWS. Po ponownym `make all` serwer ma nowe IP, więc trzeba
+zaktualizować `SERVER_IP` w GitHubie.
 
-W repozytorium: **Settings → Secrets and variables → Actions**.
+### Sekrety w GitHub Actions
 
-Secrets:
+Secrets: `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` (token z uprawnieniem Read & Write),
+`DISCORD_WEBHOOK_URL`, `SSH_PRIVATE_KEY` (prywatny klucz z `~/.ssh/devops-projekt`).
 
-| Nazwa | Wartość |
-|---|---|
-| `DOCKERHUB_USERNAME` | login Docker Hub |
-| `DOCKERHUB_TOKEN` | token Docker Hub |
-| `SSH_PRIVATE_KEY` | zawartość `~/.ssh/devops-projekt` (klucz prywatny) |
-| `DISCORD_WEBHOOK_URL` | URL webhooka |
-
-Variables:
-
-| Nazwa | Wartość |
-|---|---|
-| `DOCKERHUB_IMAGE` | `LOGIN/devops-projekt` |
-| `SERVER_IP` | wynik `terraform output server_ip` (dopóki pusta, pipeline pomija deploy) |
+Variables: `DOCKERHUB_IMAGE` (np. `login/devops-projekt`), `SERVER_IP`.
 
 ## Monitoring
 
-- Grafana: `http://IP:3000` (login `admin`, hasło z `GRAFANA_ADMIN_PASSWORD`) → folder *DevOps Projekt* → dashboard
-  z dostępnością i wersją aplikacji, ruchem HTTP, CPU/RAM/dyskiem serwera i CPU kontenerów.
-- Prometheus: `http://IP:9090` (Status → Targets pokazuje, czy wszystko jest scrapowane).
-- Alerty (Alertmanager → Discord): aplikacja niedostępna > 1 min, CPU > 85% przez 5 min, dysk < 15% wolnego.
+Prometheus zbiera metryki co 15 s z:
 
-Grafana i Prometheus są dostępne tylko z adresu IP podanego w `admin_cidr`.
+- aplikacji (`/metrics` – liczba zapytań, uptime, wersja),
+- node-exportera (CPU, RAM, dysk serwera),
+- cAdvisora (zużycie przez poszczególne kontenery).
 
-## Scenariusz demonstracji (10–12 min)
+Grafana jest na porcie 3000 (login `admin`), dashboard „DevOps Projekt – przegląd” wgrywa się sam.
+Grafana i Prometheus są dostępne tylko z adresu z `admin_cidr`.
 
-1. Pokaż stronę aplikacji z aktualną wersją i dashboard w Grafanie.
-2. `git checkout -b feature/demo`, zmień tekst w `app/main.go` **i w `app/main_test.go`**, push →
-   w Actions widać testy + build + push, bez deployu; na Discordzie powiadomienie z „Deploy: skipped”.
-3. Merge do `main` (PR albo `git merge`) → pełny pipeline z deployem, po ~2–3 min strona pokazuje nowy tag `sha-…`.
-4. Pokaż nowe tagi na Docker Hubie.
-5. Opcjonalnie: `ssh ubuntu@IP 'cd /opt/devops-projekt && docker compose stop app'` → po ~1 min alert na Discordzie,
-   panel „Status aplikacji” w Grafanie zmienia się na DOWN; `docker compose start app` → alert „resolved”.
-6. Opcjonalnie: commit z błędem w teście → czerwony pipeline i powiadomienie o porażce.
+Reguły alertów są w `ansible/templates/alert-rules.yml.j2`: aplikacja nie odpowiada przez minutę,
+CPU powyżej 85% przez 5 minut, mniej niż 15% wolnego dysku. Alertmanager wysyła je na ten sam kanał
+na Discordzie co pipeline.
 
-## Koszty i sprzątanie
+## Dlaczego tak, a nie inaczej
 
-t3.small w eu-central-1 to około 0,02–0,03 USD/h (plus Elastic IP), czyli kilkanaście dolarów miesięcznie
-przy pracy ciągłej. Po obronie:
+- **GitHub Actions zamiast Jenkinsa** – nie trzeba stawiać i utrzymywać osobnego serwera CI.
+- **Jedna EC2 z docker compose zamiast EKS** – EKS kosztuje sam w sobie, a przy jednej aplikacji
+  Kubernetes nic by nie wniósł. Całość mieści się w darmowych kredytach AWS.
+- **Deploy przez SSH** – najprostsza rzecz, która działa. Wadą jest otwarty port 22 (runnery GitHuba nie
+  mają stałych IP); logowanie jest tylko kluczem.
+- **Tag `sha-<commit>` zamiast samego `latest`** – zawsze wiadomo, która wersja chodzi na serwerze,
+  i da się wrócić do poprzedniej.
+
+## Czego brakuje
+
+- HTTPS – wymagałby domeny; najprościej byłoby dodać Caddy przed aplikacją.
+- Stan Terraforma trzymany lokalnie. W `versions.tf` jest zakomentowany backend S3.
+- Logi tylko przez `docker compose logs`, bez centralnego zbierania (Loki byłby następnym krokiem).
+- Brak automatycznego rollbacku – po nieudanym smoke teście trzeba ręcznie ustawić poprzedni tag w `.env`.
+
+## Lokalnie
 
 ```bash
-make destroy
-```
-
-## Uruchomienie lokalne
-
-```bash
-make test     # testy jednostkowe
-make local    # aplikacja na http://localhost:8080
+make test
+make local     # http://localhost:8080
 ```
